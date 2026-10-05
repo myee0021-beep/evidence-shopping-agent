@@ -52,8 +52,7 @@ def main() -> None:
         print(f"会话 {thread}｜会话记忆：{backend}｜需求理解：{parser_name}。输入 /quit 退出。")
         while True:
             try:
-                text = input("
-你：").strip()
+                text = input("\n你：").strip()
             except (EOFError, KeyboardInterrupt):
                 break
             if not text:
@@ -74,11 +73,9 @@ def main() -> None:
                 print(f"轨迹打印：{'开' if show_trace else '关'}")
                 continue
             out = agent.invoke({"user_id": args.user, "query": text}, config)
-            print(f"
-助手：{out['response']}")
+            print(f"\n助手：{out['response']}")
             if show_trace:
-                print("
-" + replay(out["trace"], out["turn"]))
+                print("\n" + replay(out["trace"], out["turn"]))
 
 
 if __name__ == "__main__":
