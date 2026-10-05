@@ -1,0 +1,26 @@
+[project]
+name = "evidence-shopping-agent"
+version = "0.1.0"
+description = "基于证据决策的多轮购物 Agent：LangGraph 编排、双层记忆、Skills 与重规划、分层评测"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "langgraph>=1.0",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+redis = ["langgraph-checkpoint-redis>=0.1"]
+llm = ["openai>=1.40"]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
