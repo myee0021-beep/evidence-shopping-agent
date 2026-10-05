@@ -1,0 +1,8 @@
+{"id": "h01_cn_number", "tags": ["口语表达"], "turns": [{"user": "预算两千左右的手机", "expect": {"route": "recommend", "constraints": {"category": "手机", "budget_max": 2000}}}]}
+{"id": "h02_exclude_colloquial", "tags": ["口语表达"], "turns": [{"user": "别给我推小米家的耳机", "expect": {"route": "recommend", "constraints": {"brands_exclude": ["小米"]}, "shown_brands_exclude": ["小米"]}}]}
+{"id": "h03_not_brand", "tags": ["口语表达"], "turns": [{"user": "有没有不是苹果的手机", "expect": {"route": "recommend", "constraints": {"brands_exclude": ["苹果"]}}}]}
+{"id": "h04_cn_budget", "tags": ["口语表达"], "turns": [{"user": "五百块以内的跑鞋", "expect": {"route": "recommend", "constraints": {"budget_max": 500}}}]}
+{"id": "h05_brand_ref", "tags": ["指代消解"], "turns": [{"user": "500以内的蓝牙耳机", "expect": {"route": "recommend"}}, {"user": "那个华为的怎么样", "expect": {"route": "detail"}}]}
+{"id": "h06_k_unit", "tags": ["口语表达"], "turns": [{"user": "3k以内的手机推荐一下", "expect": {"route": "recommend", "constraints": {"budget_max": 3000}}}]}
+{"id": "h07_negated_feature", "tags": ["口语表达"], "turns": [{"user": "耳机，不需要降噪，300以内", "expect": {"route": "recommend", "constraints": {"features": []}}}]}
+{"id": "h08_last_one", "tags": ["指代消解"], "turns": [{"user": "推荐跑鞋，800以内", "expect": {"route": "recommend"}}, {"user": "最后一个怎么样", "expect": {"route": "detail"}}]}
