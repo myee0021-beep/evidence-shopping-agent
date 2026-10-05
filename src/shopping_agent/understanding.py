@@ -48,13 +48,13 @@ CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5}
 COMPARE_WORDS = ("对比", "比较", "哪个好", "哪个更", "区别", "差别", "vs", "pk")
 CHEAPER_WORDS = ("更便宜", "便宜点", "便宜一些", "再便宜", "便宜一点")
 EXCLUDE_RE = re.compile(r"(?:不要|别要|不考虑|除了|排除|不喜欢|不买)([^，,。！!？?；;]*)")
-RANGE_RE = re.compile(r"(d+)s*(?:元|块)?s*(?:到|至|-|~)s*(d+)")
+RANGE_RE = re.compile(r"(\d+)\s*(?:元|块)?\s*(?:到|至|-|~)\s*(\d+)")
 MAX_RES = (
-    re.compile(r"(d+)s*(?:元|块)?s*(?:以内|以下|之内|内)"),
-    re.compile(r"(?:不超过|不高于|低于|预算)s*(d+)"),
+    re.compile(r"(\d+)\s*(?:元|块)?\s*(?:以内|以下|之内|内)"),
+    re.compile(r"(?:不超过|不高于|低于|预算)\s*(\d+)"),
 )
-MIN_RE = re.compile(r"(d+)s*(?:元|块)?s*以上")
-REF_RE = re.compile(r"第s*([一二两三四五1-5])s*(?:个|款|台|双|把)?")
+MIN_RE = re.compile(r"(\d+)\s*(?:元|块)?\s*以上")
+REF_RE = re.compile(r"第\s*([一二两三四五1-5])\s*(?:个|款|台|双|把)?")
 
 
 class TurnParse(BaseModel):
