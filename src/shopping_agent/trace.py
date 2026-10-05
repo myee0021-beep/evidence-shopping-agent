@@ -31,8 +31,7 @@ def replay(trace: list[dict[str, Any]], turn: int | None = None) -> str:
             extra = {k: v for k, v in e.items() if k not in ("turn", "node", "type", "status", "latency_ms")}
             status = "" if e["status"] == "ok" else f" ERROR {e.get('error')}"
             lines.append(f"  [t{e['turn']}] {e['node']:<16}{e['latency_ms']:>8}ms{status} {_short(extra)}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 FAILURE_STAGE = (
