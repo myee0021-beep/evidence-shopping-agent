@@ -43,8 +43,7 @@ class LLMParser:
         }
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"上下文：{json.dumps(context, ensure_ascii=False)}
-用户：{text}"},
+            {"role": "user", "content": f"上下文：{json.dumps(context, ensure_ascii=False)}\n用户：{text}"},
         ]
         for _ in range(2):
             resp = self.client.chat.completions.create(
