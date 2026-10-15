@@ -19,6 +19,11 @@
 
 `shown` 记录上一次展示给用户的商品，是“第二个”“这两个”“更便宜的”这类指代的依据。
 
+每轮还会记录两样东西：
+
+- `constraint_diff`：用户这句话带来的约束变化（新增 / 修改 / 删除），在画像预填和“更便宜的”推导之前计算。trace 里能直接看到“有没有更便宜的”到底改了什么，长期记忆也只从它里面抽事实；
+- `shown_snapshot`：展示时的快照（版本号 + 序号 → 商品 ID、标题、当时的价格），每轮固定注入上下文。“第二个”按快照解析，不受候选重排影响。
+
 ## 2. 路由
 
 `judge` 只根据状态和证据做决定，不调用模型：
@@ -48,15 +53,17 @@
 
 ## 5. 记忆
 
-| | 会话记忆 | 用户画像 |
+| | 会话记忆 | 长期记忆 |
 | --- | --- | --- |
-| 实现 | LangGraph checkpointer（Redis / 内存） | LangGraph Store |
-| key | `thread_id` | `("profiles", user_id)` |
-| 存什么 | 整个 `AgentState` | 按品类：不喜欢的品牌、预算、偏好属性 |
-| 什么时候读 | 每轮自动 | 新会话第一次出现某品类时 |
-| 什么时候写 | 每个节点之后自动 | 每轮结束（`update_memory`） |
+| 实现 | LangGraph checkpointer（Redis / 内存） | LangGraph Store，L0–L3 分层 |
+| key | `thread_id` | `("archive" / "memory", tenant, user_id)`，L3 画像在 `("profiles", user_id)` |
+| 存什么 | 整个 `AgentState`（历史超预算时被压缩成“摘要 + 最近几轮”） | L0 原话、L1 事实、L3 画像（L2 按需计算） |
+| 什么时候读 | 每轮自动 | 新会话第一次出现某品类时预填约束 + 预取相关事实 |
+| 什么时候写 | 每个节点之后自动 | 每轮结束（`update_memory`），只写本轮约束 diff 里的事实 |
 
 为什么会话状态放 Redis：每轮都要读写，对延迟敏感；可以设置 TTL，让过期会话自动清理。会话状态丢了，最多是用户再说一遍需求；用户画像这类长期数据不应该只放在 Redis 里。
+
+细节见 [context_compression.md](context_compression.md) 和 [long_term_memory.md](long_term_memory.md)。
 
 ## 6. 可观测性
 
