@@ -1,0 +1,40 @@
+{
+  "case_file": "cases.jsonl",
+  "parser": "rules",
+  "k": 1,
+  "cases": 20,
+  "turns": 32,
+  "metrics": {
+    "检索召回 retrieval_recall": 1.0,
+    "硬约束满足率 hard_constraint_satisfaction": 1.0,
+    "约束抽取准确率 constraint_extraction": 1.0,
+    "工具调用正确率 tool_call_accuracy": 1.0,
+    "跨轮记忆召回 memory_recall": 1.0,
+    "重规划正确率 replan_accuracy": 1.0,
+    "路由准确率 route_accuracy": 1.0,
+    "单轮成功率 turn_success": 1.0,
+    "端到端任务成功率 pass@1": 1,
+    "稳定性 pass^1": 1.0
+  },
+  "latency_ms": {
+    "end_to_end_p50": 17.53,
+    "end_to_end_p95": 21.96,
+    "per_node_p50": {
+      "understand": 0.195,
+      "retrieve": 0.695,
+      "gather_evidence": 4.96,
+      "judge": 0.06,
+      "respond": 0.08,
+      "update_memory": 0.235,
+      "compact_context": 0.13,
+      "replan": 0.01
+    }
+  },
+  "cost": {
+    "avg_window_tokens": 302,
+    "max_window_tokens": 564,
+    "compactions": 0,
+    "llm_usage": {}
+  },
+  "failures_by_stage": {}
+}

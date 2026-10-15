@@ -3,6 +3,8 @@
     python eval/run_eval.py                              # 基础用例，规则解析器
     python eval/run_eval.py --cases cases_hard.jsonl     # 口语化难例
     python eval/run_eval.py --k 3 --llm                  # LLM 解析器，每个用例跑 3 次，算 pass^3
+    python eval/run_eval.py --hybrid                     # 规则优先、搞不定才调 LLM
+    python eval/run_eval.py --ablate evidence,replan     # 消融：关掉指定模块
 
 产出（按用例文件分目录）：
     eval/results/<用例文件名>/summary.json        各项指标
@@ -29,7 +31,8 @@ from langgraph.store.memory import InMemoryStore  # noqa: E402
 from shopping_agent.catalog import load_catalog  # noqa: E402
 from shopping_agent.cli import make_parser  # noqa: E402
 from shopping_agent.config import load_settings  # noqa: E402
-from shopping_agent.harness import build_agent  # noqa: E402
+from shopping_agent.context import count_tokens  # noqa: E402
+from shopping_agent.harness import build_agent, pinned_state  # noqa: E402
 from shopping_agent.trace import attribute, turn_events  # noqa: E402
 
 
@@ -48,37 +51,54 @@ def same(actual, expected) -> bool:
     return actual == expected
 
 
+def true_price(p) -> int:
+    return p.detail_price if p.detail_price is not None else p.price
+
+
 def hard_ok(pid: str, out: dict, catalog) -> bool:
-    """展示出来的商品是否满足硬约束（按证据里的详情页价格算）。"""
+    """展示出来的商品是否满足硬约束。
+
+    按商品库里的真实值判（详情页价格、真实库存），不用 Agent 自己的证据记录：
+    否则关掉证据层后，Agent 相信列表价，评测也跟着相信列表价，等于让考生自己改卷。
+    """
     c = {k: v for k, v in out["constraints"].items() if k not in out.get("relaxed", [])}
-    p, ev = catalog[pid], out["evidence"][pid]
-    price = ev["verified_price"]
+    p = catalog[pid]
+    price = true_price(p)
     return (
         p.category == c.get("category")
         and (c.get("budget_max") is None or price <= c["budget_max"])
         and (c.get("budget_min") is None or price >= c["budget_min"])
         and p.brand not in c.get("brands_exclude", [])
         and (not c.get("brands_include") or p.brand in c["brands_include"])
-        and ev["in_stock"]
+        and p.stock > 0
     )
 
 
 def run(args) -> dict:
     settings = load_settings()
     catalog = load_catalog(settings.catalog_path)
-    parser = make_parser(settings) if args.llm else None
+    parser = getattr(args, "parser_obj", None)
+    if parser is None and (args.llm or getattr(args, "hybrid", False)):
+        parser = make_parser(settings)
+        if getattr(args, "hybrid", False):
+            from shopping_agent.llm import HybridParser
+
+            parser = HybridParser(parser)
+    ablate = frozenset(x for x in (getattr(args, "ablate", "") or "").split(",") if x)
     lines = (ROOT / "eval" / args.cases).read_text(encoding="utf-8").splitlines()
     cases = [json.loads(line) for line in lines if line.strip()]
 
     m = defaultdict(list)  # 指标名 -> list[bool | float]
     node_lat = defaultdict(list)
     e2e_lat: list[float] = []
+    window_tokens: list[int] = []
+    compactions = 0
     case_runs: dict[str, list[bool]] = defaultdict(list)
     failed = []
 
     for run_idx in range(args.k):
         for case in cases:
-            agent = build_agent(catalog, settings, InMemoryStore(), InMemorySaver(), parser)
+            agent = build_agent(catalog, settings, InMemoryStore(), InMemorySaver(), parser, ablate=ablate)
             user = case.get("user_id", "eval_user")
             prev_top_price = None
             case_ok = True
@@ -87,6 +107,9 @@ def run(args) -> dict:
                 start = time.perf_counter()
                 out = agent.invoke({"user_id": user, "query": turn["user"]}, {"configurable": {"thread_id": thread}})
                 e2e_lat.append((time.perf_counter() - start) * 1000)
+                # 下一轮发给模型的窗口：固定注入的状态 + （可能已压缩的）对话历史
+                window_tokens.append(count_tokens(pinned_state(out) + out["messages"]))
+                compactions += out.get("context", {}).get("status") in ("compacted", "summary_failed")
                 exp = turn.get("expect", {})
                 events = turn_events(out["trace"], out["turn"])
                 for e in events:
@@ -141,7 +164,7 @@ def run(args) -> dict:
                 if "shown_brands_only" in exp and any(catalog[p].brand not in exp["shown_brands_only"] for p in shown):
                     fails.append(f"推荐里出现了限定之外的品牌")
                 if exp.get("cheaper_than_prev_top") and prev_top_price is not None:
-                    prices = [out["evidence"][p]["verified_price"] for p in shown]
+                    prices = [true_price(catalog[p]) for p in shown]
                     if not prices or max(prices) >= prev_top_price:
                         fails.append(f"没有比上一轮首推（{prev_top_price} 元）更便宜")
 
@@ -161,12 +184,13 @@ def run(args) -> dict:
                         }
                     )
                 if shown:
-                    prev_top_price = out["evidence"][shown[0]]["verified_price"]
+                    prev_top_price = true_price(catalog[shown[0]])
             case_runs[case["id"]].append(case_ok)
 
     summary = {
         "case_file": args.cases,
-        "parser": "llm" if parser else "rules",
+        "parser": type(parser).__name__ if parser else "rules",
+        "ablate": sorted(ablate),
         "k": args.k,
         "cases": len(cases),
         "turns": len(m["turn_success"]) // args.k,
@@ -187,10 +211,17 @@ def run(args) -> dict:
             "end_to_end_p95": round(p95(e2e_lat), 2),
             "per_node_p50": {k: round(median(v), 3) for k, v in node_lat.items()},
         },
+        "cost": {
+            "avg_window_tokens": round(mean(window_tokens)) if window_tokens else 0,
+            "max_window_tokens": max(window_tokens, default=0),
+            "compactions": compactions,
+            "llm_usage": dict(getattr(parser, "usage", {}) or {}),
+        },
         "failures_by_stage": dict(_count(f["attribution"] for f in failed)),
     }
 
-    out_dir = ROOT / "eval" / "results" / Path(args.cases).stem
+    stem = Path(args.cases).stem + (f"__no_{'_'.join(sorted(ablate))}" if ablate else "")
+    out_dir = ROOT / "eval" / "results" / stem
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     with open(out_dir / "failed_traces.jsonl", "w", encoding="utf-8") as f:
@@ -211,5 +242,7 @@ if __name__ == "__main__":
     ap.add_argument("--k", type=int, default=1, help="每个用例重复次数，用于计算 pass^k")
     ap.add_argument("--llm", action="store_true", help="使用 LLM 解析器（需要 LLM_API_KEY）")
     ap.add_argument("--cases", default="cases.jsonl", help="eval/ 下的用例文件，如 cases_hard.jsonl")
+    ap.add_argument("--hybrid", action="store_true", help="规则优先、搞不定才调 LLM（需要 LLM_API_KEY）")
+    ap.add_argument("--ablate", default="", help="逗号分隔：state,evidence,replan,memory")
     s = run(ap.parse_args())
     print(json.dumps(s, ensure_ascii=False, indent=2))
