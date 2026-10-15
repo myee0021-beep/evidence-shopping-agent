@@ -5,7 +5,8 @@
 
 对话中可用的命令：
     /new    开一个新会话（新的 thread_id，长期画像保留）
-    /state  查看当前的结构化约束
+    /state  查看当前的结构化约束和上下文压缩情况
+    /memory 查看长期记忆：L1 事实（带来源和作用范围）和 L3 画像
     /trace  打开 / 关闭轨迹打印
     /quit   退出
 """
@@ -18,6 +19,8 @@ import uuid
 
 from langgraph.store.memory import InMemoryStore
 
+from .agent_memory import LayeredMemory
+from .archive import Caller
 from .catalog import load_catalog
 from .config import load_settings
 from .harness import build_agent
@@ -33,6 +36,16 @@ def make_parser(settings):
     return LLMParser(settings.llm_api_key, settings.llm_base_url, settings.llm_model)
 
 
+def make_summarizer(settings):
+    if not settings.llm_api_key:
+        from .context import rule_summarize
+
+        return rule_summarize
+    from .llm import LLMSummarizer
+
+    return LLMSummarizer(settings.llm_api_key, settings.llm_base_url, settings.llm_model)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--user", default="demo_user")
@@ -45,7 +58,8 @@ def main() -> None:
     show_trace = args.trace
 
     with make_checkpointer(settings.redis_url) as checkpointer:
-        agent = build_agent(catalog, settings, store, checkpointer, make_parser(settings))
+        agent = build_agent(catalog, settings, store, checkpointer, make_parser(settings), make_summarizer(settings))
+        memory = LayeredMemory(store)
         thread = uuid.uuid4().hex[:8]
         backend = "Redis" if settings.redis_url else "内存"
         parser_name = "LLM" if settings.llm_api_key else "规则"
@@ -66,7 +80,14 @@ def main() -> None:
             config = {"configurable": {"thread_id": thread}}
             if text == "/state":
                 values = agent.get_state(config).values
-                print(json.dumps(values.get("constraints", {}), ensure_ascii=False, indent=2))
+                view = {"constraints": values.get("constraints", {}), "context": values.get("context", {})}
+                print(json.dumps(view, ensure_ascii=False, indent=2))
+                continue
+            if text == "/memory":
+                caller = Caller(args.user, thread)
+                for f in memory.facts(caller):
+                    print(f"- [{f['id']}] {f['text']}｜{f['scope']}｜确认 {f['confirmations']} 次｜来源 {f['source_refs']}")
+                print(json.dumps(memory.profile(caller), ensure_ascii=False, indent=2))
                 continue
             if text == "/trace":
                 show_trace = not show_trace

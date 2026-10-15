@@ -20,6 +20,8 @@ class Settings:
     show_k: int = 3  # 最终展示给用户的商品数
     max_replans: int = 2
     min_confidence: float = 0.75  # 低于该值走“带提示推荐”
+    # 上下文预算：固定注入（状态）+ 对话历史超过 budget × 0.8 就压缩，压到约 budget × 0.4
+    context_budget_tokens: int = 2000
     redis_url: str | None = None
     llm_api_key: str | None = None
     llm_base_url: str | None = None
@@ -32,4 +34,5 @@ def load_settings() -> Settings:
         llm_api_key=os.getenv("LLM_API_KEY") or None,
         llm_base_url=os.getenv("LLM_BASE_URL") or None,
         llm_model=os.getenv("LLM_MODEL", "qwen-plus"),
+        context_budget_tokens=int(os.getenv("CONTEXT_BUDGET_TOKENS", "2000")),
     )

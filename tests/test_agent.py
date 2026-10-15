@@ -5,7 +5,6 @@ from shopping_agent.catalog import load_catalog
 from shopping_agent.config import load_settings
 from shopping_agent.evidence import build_evidence
 from shopping_agent.harness import build_agent
-from shopping_agent.memory import update_profile
 from shopping_agent.skills import REGISTRY, SkillContext, call_skill
 from shopping_agent.understanding import TurnParse, merge_constraints, rule_parse
 
@@ -122,6 +121,13 @@ def test_node_exception_is_contained(monkeypatch):
     assert errors and out["response"]
 
 
-def test_update_profile_is_category_scoped():
-    p = update_profile({}, {"category": "手机", "brands_exclude": ["小米"], "budget_max": 3000})
+def test_profile_is_category_scoped():
+    from shopping_agent.agent_memory import LayeredMemory
+    from shopping_agent.archive import Caller
+
+    mem = LayeredMemory(InMemoryStore())
+    c = {"category": "手机", "brands_exclude": ["小米"], "budget_max": 3000}
+    diff = {"added": c, "changed": {}, "removed": []}
+    for thread in ("a", "b"):  # 预算要确认 2 次才进画像
+        p = mem.record_turn(Caller("u", thread), "3000以内的手机，不要小米", diff, c, 1)["profile"]
     assert p["brand_dislikes"] == {"手机": ["小米"]} and p["budgets"] == {"手机": 3000}

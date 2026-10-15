@@ -6,7 +6,8 @@
              -> gather_evidence（证据聚合）
              -> judge（置信度判断，决定响应路径）
              -> respond（响应生成）
-             -> update_memory（写回用户画像）
+             -> update_memory（L0 原话归档 + L1 事实 + 重算 L2 / L3 画像）
+             -> compact_context（按 token 预算压缩对话历史）
 
 judge 的出口：
     recommend / caveat / compare / detail / clarify / fallback -> respond
@@ -21,20 +22,25 @@ Harness 负责的事：
 
 from __future__ import annotations
 
+import json
 import time
 from statistics import mean
 from typing import Any, Callable
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.store.base import BaseStore
 
+from .agent_memory import LayeredMemory
+from .archive import ArchiveStore, Caller
 from .catalog import Catalog
 from .config import Settings
+from .context import Summarizer, compact, count_tokens, rule_summarize
 from .evidence import describe_issues
-from .memory import load_profile, save_profile, update_profile
+from .memory import load_profile
 from .skills import SkillContext, call_skill
-from .state import AgentState
-from .understanding import TurnParse, merge_constraints, rule_parse
+from .state import AgentState, ReplaceMessages
+from .understanding import TurnParse, diff_constraints, merge_constraints, rule_parse
 
 Parser = Callable[[str, dict[str, Any], list[str]], TurnParse | None]
 
@@ -51,7 +57,10 @@ NODE_FALLBACK: dict[str, dict[str, Any]] = {
     "replan": {"route": "fallback"},
     "respond": {"response": "抱歉，系统暂时出了点问题，请稍后再试。", "messages": []},
     "update_memory": {},
+    "compact_context": {},
 }
+
+SYSTEM_PROMPT = "你是一个基于证据做推荐的购物助手。只推荐证据层校验通过的商品，不编造价格和库存。"
 
 
 def _effective(state: AgentState) -> dict[str, Any]:
@@ -82,21 +91,44 @@ def _skill_event(turn: int, node: str, name: str, args: dict[str, Any], res: dic
     }
 
 
+def pinned_state(state: AgentState) -> list[dict[str, Any]]:
+    """每轮固定注入、不参与压缩的部分：系统指令 + 结构化购物状态。"""
+    snap = state.get("shown_snapshot", {})
+    items = [f"{it['ord']}. {it['title']}（{it['price']} 元，id={it['id']}）" for it in snap.get("items", [])]
+    body = {
+        "约束": state.get("constraints", {}),
+        "上次展示（序号 -> 商品，第 %s 轮快照）" % snap.get("version", "-"): items,
+    }
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "name": "shopping_state", "content": json.dumps(body, ensure_ascii=False)},
+    ]
+
+
 def build_agent(
     catalog: Catalog,
     settings: Settings,
     store: BaseStore,
     checkpointer: Any,
     parser: Parser | None = None,
+    summarizer: Summarizer = rule_summarize,
 ):
     ctx = SkillContext(catalog, settings)
+    memory = LayeredMemory(store)
+    archive = ArchiveStore(store)
+
+    def caller_of(state: AgentState) -> Caller:
+        return Caller(user_id=state["user_id"], thread_id=state.get("thread_id", "default"))
 
     def guarded(name: str, fn: Callable[[AgentState], dict[str, Any]]):
         """包一层：计时、记录 trace、异常兜底。"""
 
-        def wrapper(state: AgentState) -> dict[str, Any]:
+        def wrapper(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
             start = time.perf_counter()
             turn = state.get("turn", 0) + (1 if name == "understand" else 0)
+            if name == "understand":
+                # 归档和一次性记忆按会话隔离，需要知道当前 thread_id
+                state = {**state, "thread_id": config.get("configurable", {}).get("thread_id", "default")}
             try:
                 out = fn(state)
                 status, error = "ok", None
@@ -126,16 +158,25 @@ def build_agent(
 
         parsed, source = None, "rules"
         if parser is not None:
-            parsed = parser(query, prev, [catalog[i].title for i in shown])
+            titles = [catalog[i].title for i in shown]
+            if getattr(parser, "wants_history", False):
+                # 历史已经过压缩：摘要 + 最近几轮，约束和展示快照在 prev / titles 里单独给
+                parsed = parser(query, prev, titles, history=state.get("messages", []))
+            else:
+                parsed = parser(query, prev, titles)
             source = "llm" if parsed else "rules(llm_failed)"
         if parsed is None:
             parsed = rule_parse(query)
 
         constraints = merge_constraints(prev, parsed)
+        # 只记录用户这句话带来的变化；后面的画像预填、“更便宜的”不算用户原话
+        diff = diff_constraints(prev, constraints)
 
-        # 长期记忆：新会话第一次出现品类时，用画像预填约束
+        # 长期记忆：新会话第一次出现品类时，用 L3 画像预填约束，并预取相关的 L1 / L2
+        memory_hits: list[dict[str, Any]] = []
         if not prev.get("category") and constraints.get("category"):
             profile = load_profile(store, state["user_id"])
+            memory_hits = memory.search(caller_of(state), query, k=3)
             dislikes = [
                 b
                 for b in profile.get("brand_dislikes", {}).get(constraints["category"], [])
@@ -169,9 +210,11 @@ def build_agent(
 
         return {
             "turn": turn,
+            "thread_id": state["thread_id"],
             "messages": [{"role": "user", "content": query}],
             "intent": intent,
             "constraints": constraints,
+            "constraint_diff": diff,
             "refs": refs,
             "focus": focus,
             "relaxed": [],
@@ -179,7 +222,14 @@ def build_agent(
             "candidates": [],
             "comparison": {},
             "notes": notes,
-            "_trace": {"parser": source, "intent": intent, "constraints": constraints, "focus": focus},
+            "_trace": {
+                "parser": source,
+                "intent": intent,
+                "constraints": constraints,
+                "diff": diff,
+                "focus": focus,
+                "memory_hits": [h["id"] for h in memory_hits],
+            },
         }
 
     def retrieve(state: AgentState) -> dict[str, Any]:
@@ -310,9 +360,21 @@ def build_agent(
                     lines.append(f"最接近的是「{p.title}」，{p.price} 元。要不要放宽一下预算？")
 
         text = "\n".join(lines)
+        snapshot = state.get("shown_snapshot", {})
+        if route in ("recommend", "caveat"):
+            # 快照：序号 -> 商品 ID 的映射和展示时的价格固定下来，
+            # 下一轮“第二个”按快照解析，不受候选重排影响；“刚才那款多少钱”也读快照
+            snapshot = {
+                "version": state["turn"],
+                "items": [
+                    {"ord": i, "id": pid, "title": catalog[pid].title, "price": evidence[pid]["verified_price"]}
+                    for i, pid in enumerate(shown, 1)
+                ],
+            }
         return {
             "response": text,
             "shown": shown,
+            "shown_snapshot": snapshot,
             "messages": [{"role": "assistant", "content": text}],
             "_trace": {"route": route, "shown": shown},
         }
@@ -320,9 +382,37 @@ def build_agent(
     def update_memory(state: AgentState) -> dict[str, Any]:
         if state.get("route") == "clarify" or not state.get("constraints", {}).get("category"):
             return {}
-        profile = update_profile(load_profile(store, state["user_id"]), state["constraints"])
-        save_profile(store, state["user_id"], profile)
-        return {"_trace": {"profile": profile}}
+        res = memory.record_turn(
+            caller_of(state), state["query"], state.get("constraint_diff", {}), state["constraints"], state["turn"]
+        )
+        return {
+            "_trace": {
+                "source_ref": res["source_ref"],
+                "facts": [f"{f['op']}:{f['text']}({f['scope']})" for f in res["facts"]],
+                "profile": {k: v for k, v in res["profile"].items() if k != "provenance"},
+            }
+        }
+
+    def compact_context(state: AgentState) -> dict[str, Any]:
+        msgs = state.get("messages", [])
+        res = compact(
+            msgs,
+            budget=settings.context_budget_tokens,
+            pinned_tokens=count_tokens(pinned_state(state)),
+            archive=archive,
+            caller=caller_of(state),
+            summarizer=summarizer,
+        )
+        stats = {
+            "status": res.status,
+            "tokens_before": res.tokens_before,
+            "tokens_after": res.tokens_after,
+            "refs": res.ref_ids,
+        }
+        out: dict[str, Any] = {"context": stats, "_trace": stats}
+        if res.changed:
+            out["messages"] = ReplaceMessages(res.messages)
+        return out
 
     # ---------- 图 ----------
 
@@ -335,6 +425,7 @@ def build_agent(
         ("replan", replan),
         ("respond", respond),
         ("update_memory", update_memory),
+        ("compact_context", compact_context),
     ]:
         g.add_node(name, guarded(name, fn))
 
@@ -351,7 +442,8 @@ def build_agent(
     g.add_conditional_edges("judge", lambda s: "replan" if s["route"] == "replan" else "respond", ["replan", "respond"])
     g.add_conditional_edges("replan", lambda s: "respond" if s.get("route") == "fallback" else "retrieve", ["retrieve", "respond"])
     g.add_edge("respond", "update_memory")
-    g.add_edge("update_memory", END)
+    g.add_edge("update_memory", "compact_context")
+    g.add_edge("compact_context", END)
     return g.compile(checkpointer=checkpointer, store=store)
 
 

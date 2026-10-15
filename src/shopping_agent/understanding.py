@@ -149,3 +149,26 @@ def merge_constraints(prev: dict[str, Any], p: TurnParse) -> dict[str, Any]:
     base["features"] = sorted(set(base.get("features", [])) | set(p.features))
     base.setdefault("brands_include", [])
     return base
+
+
+def diff_constraints(prev: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """本轮约束变化：新增 / 修改 / 删除。
+
+    每轮只记录 diff，而不是让模型每轮重新抽一遍全部约束：
+    - 便于 trace 里看清“有没有更便宜的”到底改了什么；
+    - 长期记忆只从 diff 里抽事实，同一个约束被沿用不算用户“又说了一遍”。
+    """
+
+    def empty(v: Any) -> bool:
+        return v is None or v == [] or v == ""
+
+    added, changed, removed = {}, {}, []
+    for k in sorted(set(prev) | set(new)):
+        a, b = prev.get(k), new.get(k)
+        if empty(a) and not empty(b):
+            added[k] = b
+        elif not empty(a) and empty(b):
+            removed.append(k)
+        elif not empty(a) and a != b:
+            changed[k] = {"from": a, "to": b}
+    return {"added": added, "changed": changed, "removed": removed}
