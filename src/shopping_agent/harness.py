@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from statistics import mean
 from typing import Any, Callable
 
@@ -36,13 +37,24 @@ from .archive import ArchiveStore, Caller
 from .catalog import Catalog
 from .config import Settings
 from .context import Summarizer, compact, count_tokens, rule_summarize
-from .evidence import describe_issues
+from .evidence import describe_issues, fact_check
 from .memory import load_profile
+from .privacy import GUARD_REPLY, guard_reason
 from .skills import SkillContext, call_skill
 from .state import AgentState, ReplaceMessages
 from .understanding import TurnParse, diff_constraints, merge_constraints, rule_parse
 
 Parser = Callable[[str, dict[str, Any], list[str]], TurnParse | None]
+# 回复润色（比如交给 LLM 改写措辞）：输入模板回复和状态，输出新回复。改写后必须通过事实校验
+Rewriter = Callable[[str, AgentState], str]
+
+# 消融开关：关掉某个模块，看它到底贡献了多少
+ABLATIONS = {
+    "state": "不做跨轮约束继承（每轮只看这一句话）",
+    "evidence": "不做证据校验（相信列表页价格和库存）",
+    "replan": "不重规划（检索为空直接兜底）",
+    "memory": "不读写长期记忆",
+}
 
 # 软约束的放宽顺序：先放宽属性，再放宽指定品牌。预算、品类、排除品牌属于硬约束，从不自动放宽。
 RELAX_ORDER = ("features", "brands_include")
@@ -112,7 +124,12 @@ def build_agent(
     checkpointer: Any,
     parser: Parser | None = None,
     summarizer: Summarizer = rule_summarize,
+    rewriter: Rewriter | None = None,
+    ablate: frozenset[str] = frozenset(),
 ):
+    unknown = set(ablate) - set(ABLATIONS)
+    if unknown:
+        raise ValueError(f"unknown ablation: {sorted(unknown)}")
     ctx = SkillContext(catalog, settings)
     memory = LayeredMemory(store)
     archive = ArchiveStore(store)
@@ -152,9 +169,25 @@ def build_agent(
     def understand(state: AgentState) -> dict[str, Any]:
         turn = state.get("turn", 0) + 1
         query = state["query"]
-        prev = state.get("constraints", {})
+        prev = {} if "state" in ablate else state.get("constraints", {})
         shown = state.get("shown", [])
         notes: list[str] = []
+
+        # 套话类意图（供应商、进货价、系统提示词、他人信息）：不解析、不检索、不调 skill
+        if reason := guard_reason(query):
+            return {
+                "turn": turn,
+                "thread_id": state["thread_id"],
+                "messages": [{"role": "user", "content": query}],
+                "intent": "guard",
+                "constraint_diff": {"added": {}, "changed": {}, "removed": []},
+                "relaxed": [],
+                "replan_count": 0,
+                "candidates": [],
+                "focus": [],
+                "notes": [],
+                "_trace": {"intent": "guard", "guard": reason},
+            }
 
         parsed, source = None, "rules"
         if parser is not None:
@@ -174,7 +207,7 @@ def build_agent(
 
         # 长期记忆：新会话第一次出现品类时，用 L3 画像预填约束，并预取相关的 L1 / L2
         memory_hits: list[dict[str, Any]] = []
-        if not prev.get("category") and constraints.get("category"):
+        if "memory" not in ablate and not prev.get("category") and constraints.get("category"):
             profile = load_profile(store, state["user_id"])
             memory_hits = memory.search(caller_of(state), query, k=3)
             dislikes = [
@@ -243,23 +276,44 @@ def build_agent(
             "_trace": {"candidates": ids},
         }
 
+    def evidence_for(turn: int, pid: str, constraints: dict[str, Any]) -> tuple[dict | None, list[dict]]:
+        """单个商品：拉详情 -> 校验证据。各商品之间互不依赖，可以并行。"""
+        events = []
+        r1 = call_skill("get_product_detail", {"product_id": pid}, ctx)
+        events.append(_skill_event(turn, "gather_evidence", "get_product_detail", {"product_id": pid}, r1))
+        if not r1["ok"]:
+            return None, events
+        if "evidence" in ablate:
+            # 消融：直接相信列表页的价格和库存
+            d = r1["data"]
+            ev = {
+                "product_id": pid, "verified_price": d["price"], "list_price": d["price"], "in_stock": True,
+                "seller": d["seller"], "seller_rating": d["seller_rating"], "features": d["features"],
+                "age_days": 0, "coverage": 1.0, "issues": [], "confidence": 1.0, "violations": [], "usable": True,
+            }
+            return ev, events
+        args = {"product_id": pid, "constraints": constraints}
+        r2 = call_skill("verify_evidence", args, ctx)
+        events.append(_skill_event(turn, "gather_evidence", "verify_evidence", args, r2))
+        return (r2["data"] if r2["ok"] else None), events
+
     def gather_evidence(state: AgentState) -> dict[str, Any]:
         turn = state["turn"]
         compare_like = state["intent"] in ("compare", "detail")
         targets = state["focus"] if compare_like else state["candidates"]
         constraints = {} if compare_like else _effective(state)
+        if settings.parallel_evidence and len(targets) > 1:
+            # 详情服务是下游 RPC，串行时总耗时 = 候选数 × 单次时延；并行后约等于最慢的一次
+            with ThreadPoolExecutor(max_workers=min(len(targets), settings.max_workers)) as pool:
+                results = list(pool.map(lambda pid: evidence_for(turn, pid, constraints), targets))
+        else:
+            results = [evidence_for(turn, pid, constraints) for pid in targets]
         evidence: dict[str, dict] = {}
-        events = []
-        for pid in targets:
-            r1 = call_skill("get_product_detail", {"product_id": pid}, ctx)
-            events.append(_skill_event(turn, "gather_evidence", "get_product_detail", {"product_id": pid}, r1))
-            if not r1["ok"]:
-                continue
-            args = {"product_id": pid, "constraints": constraints}
-            r2 = call_skill("verify_evidence", args, ctx)
-            events.append(_skill_event(turn, "gather_evidence", "verify_evidence", args, r2))
-            if r2["ok"]:
-                evidence[pid] = r2["data"]
+        events: list[dict] = []
+        for pid, (ev, evs) in zip(targets, results):  # 按候选顺序汇总，trace 顺序稳定
+            events += evs
+            if ev is not None:
+                evidence[pid] = ev
         out: dict[str, Any] = {"evidence": evidence, "trace": events}
         if state["intent"] == "compare":
             args = {"product_ids": state["focus"]}
@@ -275,6 +329,8 @@ def build_agent(
     def judge(state: AgentState) -> dict[str, Any]:
         intent = state["intent"]
         evidence = state.get("evidence", {})
+        if intent == "guard":
+            return {"route": "guard", "confidence": 0.0, "_trace": {"route": "guard"}}
         if intent == "clarify":
             return {"route": "clarify", "confidence": 0.0, "_trace": {"route": "clarify"}}
         if intent in ("compare", "detail"):
@@ -284,7 +340,7 @@ def build_agent(
 
         usable = [p for p in state["candidates"] if evidence.get(p, {}).get("usable")]
         if not usable:
-            key = _next_relaxation(state)
+            key = None if "replan" in ablate else _next_relaxation(state)
             if key and state.get("replan_count", 0) < settings.max_replans:
                 route = "replan"
             else:
@@ -313,8 +369,11 @@ def build_agent(
         evidence = state.get("evidence", {})
         shown = state.get("shown", [])
         lines = [f"（{n}）" for n in notes]
+        evidence = dict(evidence)
 
-        if route == "clarify":
+        if route == "guard":
+            lines.append(GUARD_REPLY)
+        elif route == "clarify":
             if not state.get("constraints", {}).get("category"):
                 lines.append("想买哪类商品？比如蓝牙耳机、手机、跑鞋或机械键盘，预算大概多少？")
             else:
@@ -356,10 +415,28 @@ def build_agent(
                 res = call_skill("search_products", {**relaxed_budget, "limit": 20}, ctx)
                 if res["ok"] and res["data"]:
                     nearest = min(res["data"], key=lambda pid: catalog[pid].price)
-                    p = catalog[nearest]
-                    lines.append(f"最接近的是「{p.title}」，{p.price} 元。要不要放宽一下预算？")
+                    # 兜底推荐也要按详情页价格报价，不能直接报列表价
+                    ev, _ = evidence_for(state["turn"], nearest, {})
+                    if ev is not None:
+                        evidence[nearest] = ev
+                        p = catalog[nearest]
+                        lines.append(f"最接近的是「{p.title}」，{ev['verified_price']} 元。要不要放宽一下预算？")
 
         text = "\n".join(lines)
+        # 回复里出现的每个价格都必须来自证据层；改写后对不上就退回模板回复
+        allowed = {e["verified_price"] for e in evidence.values()}
+        # 上一轮快照里的价格也是核验过的（“在 X（499 元）的基础上找更便宜的”）
+        allowed |= {it["price"] for it in state.get("shown_snapshot", {}).get("items", [])}
+        check = {"ok": True, "rewritten": False}
+        if rewriter is not None and route in ("recommend", "caveat", "compare", "detail"):
+            candidate = rewriter(text, state)
+            bad = fact_check(candidate, allowed)
+            if bad:
+                check = {"ok": False, "rewritten": False, "unverified_prices": bad}
+            else:
+                text, check = candidate, {"ok": True, "rewritten": True}
+        elif bad := fact_check(text, allowed):
+            check = {"ok": False, "unverified_prices": bad}
         snapshot = state.get("shown_snapshot", {})
         if route in ("recommend", "caveat"):
             # 快照：序号 -> 商品 ID 的映射和展示时的价格固定下来，
@@ -376,11 +453,13 @@ def build_agent(
             "shown": shown,
             "shown_snapshot": snapshot,
             "messages": [{"role": "assistant", "content": text}],
-            "_trace": {"route": route, "shown": shown},
+            "_trace": {"route": route, "shown": shown, "fact_check": check},
         }
 
     def update_memory(state: AgentState) -> dict[str, Any]:
-        if state.get("route") == "clarify" or not state.get("constraints", {}).get("category"):
+        if "memory" in ablate or state.get("route") in ("clarify", "guard"):
+            return {}
+        if not state.get("constraints", {}).get("category"):
             return {}
         res = memory.record_turn(
             caller_of(state), state["query"], state.get("constraint_diff", {}), state["constraints"], state["turn"]
@@ -432,7 +511,7 @@ def build_agent(
     g.add_edge(START, "understand")
     g.add_conditional_edges(
         "understand",
-        lambda s: {"clarify": "judge", "compare": "gather_evidence", "detail": "gather_evidence"}.get(
+        lambda s: {"clarify": "judge", "guard": "judge", "compare": "gather_evidence", "detail": "gather_evidence"}.get(
             s["intent"], "retrieve"
         ),
         ["judge", "gather_evidence", "retrieve"],

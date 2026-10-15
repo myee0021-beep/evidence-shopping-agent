@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from pydantic import ValidationError
 
-from .understanding import BRANDS, CATEGORIES, FEATURES, TurnParse
+from .understanding import BRANDS, CATEGORIES, FEATURES, TurnParse, rule_parse
 
 SYSTEM_PROMPT = f"""你是购物助手的需求理解模块。把用户这一句话解析成 JSON，只描述这一句话本身。
 
@@ -35,6 +36,7 @@ class LLMParser:
 
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
+        self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
     # harness 看到这个标记，会把压缩后的对话窗口（摘要 + 最近几轮）一起传进来
     wants_history = True
@@ -63,6 +65,7 @@ class LLMParser:
                 temperature=0,
                 response_format={"type": "json_object"},
             )
+            _add_usage(self.usage, resp)
             raw = resp.choices[0].message.content or ""
             try:
                 return TurnParse(**json.loads(raw))
@@ -72,6 +75,58 @@ class LLMParser:
                     {"role": "user", "content": f"输出不合法：{e}。请只输出符合字段要求的 JSON。"},
                 ]
         return None
+
+
+def _add_usage(usage: dict[str, int], resp: Any) -> None:
+    usage["calls"] += 1
+    u = getattr(resp, "usage", None)
+    if u is not None:
+        usage["prompt_tokens"] += getattr(u, "prompt_tokens", 0) or 0
+        usage["completion_tokens"] += getattr(u, "completion_tokens", 0) or 0
+
+
+# 规则搞不定的口语信号：中文数字 / 3k、口语否定、按品牌或位置指代
+COLLOQUIAL_RE = re.compile(
+    r"[一二两三四五六七八九十百千万]+\s*(?:块|元|千|百|万)|\d+(?:\.\d+)?\s*[kKwW千万]"
+    r"|别给|不是|不需要|不用|不想要|不太要|那个.{0,6}的|最后一个|倒数|上一个|刚才"
+)
+
+
+class HybridParser:
+    """规则优先，规则搞不定才调 LLM：省成本、省时延，命中规则的句子零延迟。
+
+    什么时候调 LLM：
+    - 规则什么都没解析出来（没有品类、预算、品牌、属性、指代）；
+    - 句子里有规则处理不了的口语信号（“两千”“3k”“别给我推”“不是苹果的”“那个华为的”）。
+    llm_rate 记录 LLM 调用占比，评测时一起看成本。
+    """
+
+    def __init__(self, llm: Any):
+        self.llm = llm
+        self.wants_history = getattr(llm, "wants_history", False)
+        self.stats = {"turns": 0, "llm_calls": 0}
+
+    @property
+    def usage(self) -> dict[str, Any]:
+        u = dict(getattr(self.llm, "usage", {}))
+        u["llm_rate"] = round(self.stats["llm_calls"] / self.stats["turns"], 4) if self.stats["turns"] else 0.0
+        return {**u, **self.stats}
+
+    @staticmethod
+    def needs_llm(text: str, p: TurnParse) -> bool:
+        empty = not (p.category or p.budget_max or p.budget_min or p.brands_include or p.brands_exclude
+                     or p.features or p.refs or p.cheaper or p.intent == "compare")
+        return empty or bool(COLLOQUIAL_RE.search(text))
+
+    def __call__(self, text: str, prev: dict[str, Any], shown_titles: list[str], **kw: Any) -> TurnParse | None:
+        self.stats["turns"] += 1
+        p = rule_parse(text)
+        if not self.needs_llm(text, p):
+            return p
+        self.stats["llm_calls"] += 1
+        if not self.wants_history:
+            kw.pop("history", None)
+        return self.llm(text, prev, shown_titles, **kw) or p
 
 
 SUMMARY_PROMPT = """你在为购物助手压缩对话历史。把“已有摘要”和“新增对话”合并成一份新摘要，分四类，每条一行，以“- ”开头：

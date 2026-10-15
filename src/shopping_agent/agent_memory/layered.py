@@ -23,6 +23,7 @@ from langgraph.store.base import BaseStore
 
 from ..archive import ArchiveStore, Caller
 from ..memory import PROFILE_NS
+from ..privacy import redact_pii
 from .facts import CONFIRM_THRESHOLD, FactDraft, extract_facts
 from .search import Embedder, hashing_embed, hybrid_search
 
@@ -62,7 +63,9 @@ class LayeredMemory:
         drafts = extract_facts(query, diff, constraints)
         if not drafts:
             return {"source_ref": None, "facts": [], "profile": self.profile(caller)}
-        source_ref = self.archive.put(caller, "utterance", query, visibility="user", meta={"turn": turn})
+        # 跨会话可读的原话归档一律先脱敏：手机号、邮箱、证件号、卡号不进长期记忆
+        clean, pii = redact_pii(query)
+        source_ref = self.archive.put(caller, "utterance", clean, visibility="user", meta={"turn": turn, "pii": pii})
         written = [self._upsert(caller, d, source_ref) for d in drafts]
         profile = self.profile(caller)
         # 写到 memory.load_profile 读的位置，harness 预填约束时直接读 L3

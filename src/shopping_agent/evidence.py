@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .catalog import Product
@@ -78,3 +79,14 @@ def hard_violations(p: Product, ev: dict[str, Any], c: dict[str, Any]) -> list[s
 
 def describe_issues(ev: dict[str, Any]) -> list[str]:
     return [ISSUE_TEXT[i].format(days=ev["age_days"]) for i in ev["issues"] if i != "out_of_stock"]
+
+
+PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*元")
+
+
+def fact_check(text: str, allowed_prices: set[float]) -> list[float]:
+    """回复里出现的每个“X 元”都必须是证据层核验过的价格，返回对不上的那些。
+
+    模板回复天然一致；这道校验是给 LLM 润色回复准备的：模型只负责措辞，价格由证据层决定。
+    """
+    return [float(x) for x in PRICE_RE.findall(text) if float(x) not in allowed_prices]
