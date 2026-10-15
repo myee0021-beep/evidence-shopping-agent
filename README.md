@@ -16,6 +16,8 @@
 | 证据不足时模型直接给推荐 | 证据层统一校验价格、库存、商家、时效；不可用或低置信度的商品不推荐或带提示推荐 |
 | 检索为空时只会重复调用工具 | 重规划：按顺序放宽软约束；硬约束从不自动放宽，没有结果就兜底并给出最接近的选项 |
 | 出了 bad case 不知道错在哪 | 每个节点、每次 skill 调用都写 trace，支持回放和错误归因 |
+| 改了策略不知道有没有引入新问题 | 回归门禁：分层指标 + 失败阶段分布和基线逐项对比；消融表量化每个模块的贡献 |
+| 用户隐私、套话、模型编造 | 记忆按用户隔离并脱敏；套话意图直接拦截；回复里的价格必须和证据层一致 |
 
 ## 架构
 
@@ -45,8 +47,9 @@ flowchart LR
 | --- | --- |
 | [`harness.py`](src/shopping_agent/harness.py) | 受控执行链、路由决策、重规划、异常兜底、trace 记录 |
 | [`understanding.py`](src/shopping_agent/understanding.py) | 规则版意图识别与约束抽取；跨轮约束合并（品类切换重置、排除品牌取并集、指定品牌覆盖） |
-| [`llm.py`](src/shopping_agent/llm.py) | LLM 版解析器（OpenAI 兼容接口）：JSON 输出 + pydantic 校验 + 失败重试，仍失败则回退到规则 |
-| [`skills.py`](src/shopping_agent/skills.py) | 5 个 skill：`search_products`、`filter_by_attributes`、`get_product_detail`、`verify_evidence`、`compare_products`。统一注册、参数校验、耗时统计，可导出 function calling schema |
+| [`llm.py`](src/shopping_agent/llm.py) | LLM 版解析器（OpenAI 兼容接口）：JSON 输出 + pydantic 校验 + 失败重试，仍失败则回退到规则；`HybridParser` 规则优先、搞不定才调 LLM；LLM 摘要器 |
+| [`skills.py`](src/shopping_agent/skills.py) | 5 个 skill：`search_products`、`filter_by_attributes`、`get_product_detail`、`verify_evidence`、`compare_products`。统一注册、参数校验、超时和重试（只读 skill 才重试）、耗时统计，可导出 function calling schema。契约和下游服务见 [docs/skills.md](docs/skills.md) |
+| [`privacy.py`](src/shopping_agent/privacy.py) | 长期记忆写入前脱敏；套话类意图（供应商、进货价、提示词、他人信息）识别 |
 | [`retrieval.py`](src/shopping_agent/retrieval.py) | 硬约束过滤 + 相关度排序 + 收缩候选池 |
 | [`evidence.py`](src/shopping_agent/evidence.py) | 证据聚合：详情页价格、库存、商家评分、信息时效；冲突 / 缺失 / 过期检测；按详情页价格复核硬约束；置信度 |
 | [`memory.py`](src/shopping_agent/memory.py) | 记忆入口：checkpointer（会话）+ 读 L3 画像 |
@@ -57,6 +60,9 @@ flowchart LR
 | [`trace.py`](src/shopping_agent/trace.py) | trace 回放与错误归因 |
 | [`eval/run_eval.py`](eval/run_eval.py) | 分层评测 |
 | [`eval/run_context_eval.py`](eval/run_context_eval.py) | 长对话上下文策略对比（固定 5 轮 vs 预算压缩） |
+| [`eval/regression.py`](eval/regression.py) | 回归门禁：和 `eval/baselines/` 逐项对比，任何一层退步就失败 |
+| [`eval/run_ablation.py`](eval/run_ablation.py) | 消融：逐个关掉结构化状态 / 证据层 / 重规划 / 长期记忆 |
+| [`eval/run_perf.py`](eval/run_perf.py) | 证据聚合串行 vs 并行的时延对比 |
 
 ## 快速开始
 
@@ -124,7 +130,12 @@ python eval/run_eval.py --cases cases_hard.jsonl   # 口语化难例：8 个对�
 python eval/run_eval.py --llm --k 3                # LLM 解析器，每个用例跑 3 次，算 pass^3
 python -m shopping_agent.trace eval/results/cases_hard/failed_traces.jsonl   # 回放失败轮次
 python eval/run_context_eval.py --turns 10 20                # 长对话：固定 5 轮 vs 预算压缩（合成数据，仅验证机制）
+python eval/regression.py                                    # 回归门禁：退步时退出码 1
+python eval/run_ablation.py                                  # 消融表
+python eval/run_perf.py --latency-ms 30                      # 证据聚合并行化（模拟下游时延）
 ```
+
+消融（基础用例）：去掉证据层后端到端从 100% 掉到 60%，硬约束满足率掉到 92%；去掉结构化状态后跨轮记忆召回只剩 53%。并行拉取商品详情后，在模拟 30ms 的详情服务时延下，端到端 p50 从 164.9ms 降到 49.7ms，决策结果不变。完整的表和解读见 [docs/interview_followups.md](docs/interview_followups.md)。
 
 指标分层设计，每一层回答一个问题：
 
@@ -161,6 +172,8 @@ python eval/run_context_eval.py --turns 10 20                # 长对话：固�
 - **“更便宜的”是相对约束**：以用户指代的商品（没有就用上一轮首推）的详情价为锚点，收紧预算上限。
 - **长期偏好按品类存**：不喜欢小米耳机，不代表不看小米手机。
 - **失败不抛异常**：skill 统一返回 `{"ok", "data"/"error"}`；节点异常由 harness 接住，走安全路径并记录 trace。
+- **评测不用被测系统的中间结果判对错**：硬约束按商品库里的真实详情价和库存判断。之前用的是 Agent 自己的证据记录，关掉证据层后评测也跟着信列表价，硬约束满足率虚高到 100%。
+- **模型只负责措辞，事实由证据层决定**：接 LLM 润色回复时，回复里的每个价格都要和证据一致，对不上就退回模板。
 
 ## 已知局限与后续计划
 
@@ -169,7 +182,10 @@ python eval/run_context_eval.py --turns 10 20                # 长对话：固�
 - [x] 上下文压缩：按 token 预算触发、安全切分、归档 + 增量摘要、`recall_context`
 - [x] 长期记忆分层（L0–L3），事实带作用范围、确认次数和出处
 - [x] 接入 ShoppingBench（adapter、官方格式 rollout、本地评分）
+- [x] 回归门禁、消融表、窗口 token 统计、证据聚合并行化
+- [x] 隐私与安全：记忆脱敏、套话拦截、回复事实一致性校验
 - [ ] 在 ShoppingBench 上跑出 product / voucher 的第一批 ASR，按失败归因挑 2～3 类修，做消融表
+- [ ] 回归门禁接 CI（GitHub Actions），每个 PR 自动跑
 - [ ] 属性同义改写（“crimson” vs “red”）的核验
 - [ ] 记忆加时间衰减；一次性需求改由 LLM 判断作用范围
 - [ ] 用户画像和归档目前存在内存 Store，可以换成 Redis / Postgres Store
@@ -187,6 +203,8 @@ docs/design.md        设计说明
 docs/context_compression.md   上下文压缩
 docs/long_term_memory.md      L0–L3 长期记忆
 docs/shoppingbench.md         ShoppingBench 接入与评测
+docs/skills.md                skill 契约和下游服务
+docs/interview_followups.md   面试追问与对应的工程改进
 ```
 
 ## 参考
