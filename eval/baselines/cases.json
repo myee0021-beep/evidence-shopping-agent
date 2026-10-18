@@ -17,22 +17,22 @@
     "稳定性 pass^1": 1.0
   },
   "latency_ms": {
-    "end_to_end_p50": 17.53,
-    "end_to_end_p95": 21.96,
+    "end_to_end_p50": 12.3,
+    "end_to_end_p95": 16.55,
     "per_node_p50": {
-      "understand": 0.195,
-      "retrieve": 0.695,
-      "gather_evidence": 4.96,
-      "judge": 0.06,
-      "respond": 0.08,
-      "update_memory": 0.235,
-      "compact_context": 0.13,
+      "understand": 0.11,
+      "retrieve": 0.29,
+      "gather_evidence": 1.91,
+      "judge": 0.03,
+      "respond": 2.965,
+      "update_memory": 0.145,
+      "compact_context": 0.09,
       "replan": 0.01
     }
   },
   "cost": {
-    "avg_window_tokens": 302,
-    "max_window_tokens": 564,
+    "avg_window_tokens": 415,
+    "max_window_tokens": 943,
     "compactions": 0,
     "llm_usage": {}
   },

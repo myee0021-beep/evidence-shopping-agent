@@ -40,6 +40,7 @@ from .context import Summarizer, compact, count_tokens, rule_summarize
 from .evidence import describe_issues, fact_check
 from .memory import load_profile
 from .privacy import GUARD_REPLY, guard_reason
+from .reviews import citation_check, load_reviews, reason_lines, select_aspects, snippet_index
 from .skills import SkillContext, call_skill
 from .state import AgentState, ReplaceMessages
 from .understanding import TurnParse, diff_constraints, merge_constraints, rule_parse
@@ -54,6 +55,7 @@ ABLATIONS = {
     "evidence": "不做证据校验（相信列表页价格和库存）",
     "replan": "不重规划（检索为空直接兜底）",
     "memory": "不读写长期记忆",
+    "reviews": "不检索评论证据（推荐理由只用商品字段）",
 }
 
 # 软约束的放宽顺序：先放宽属性，再放宽指定品牌。预算、品类、排除品牌属于硬约束，从不自动放宽。
@@ -130,7 +132,7 @@ def build_agent(
     unknown = set(ablate) - set(ABLATIONS)
     if unknown:
         raise ValueError(f"unknown ablation: {sorted(unknown)}")
-    ctx = SkillContext(catalog, settings)
+    ctx = SkillContext(catalog, settings, load_reviews(settings.reviews_path) if "reviews" not in ablate else {})
     memory = LayeredMemory(store)
     archive = ArchiveStore(store)
 
@@ -363,6 +365,29 @@ def build_agent(
             "_trace": {"relaxed": key},
         }
 
+    def reviews_for(state: AgentState, pids: list[str]) -> tuple[dict[str, dict], list[dict]]:
+        """给要展示的商品拉评论证据。商品之间互不依赖，和证据聚合一样并行。"""
+        if "reviews" in ablate or not ctx.reviews or not pids:
+            return {}, []
+        user_features = state.get("constraints", {}).get("features", [])
+
+        def one(pid: str) -> tuple[str, dict | None, dict]:
+            aspects = select_aspects(state.get("query", ""), user_features, catalog[pid].features)
+            if not aspects:
+                return pid, None, {}
+            args = {"product_id": pid, "aspects": aspects}
+            res = call_skill("get_review_evidence", args, ctx)
+            return pid, (res["data"] if res["ok"] else None), _skill_event(
+                state["turn"], "review_evidence", "get_review_evidence", args, res)
+
+        if settings.parallel_evidence and len(pids) > 1:
+            with ThreadPoolExecutor(max_workers=min(len(pids), settings.max_workers)) as pool:
+                results = list(pool.map(one, pids))
+        else:
+            results = [one(p) for p in pids]
+        evs = {pid: ev for pid, ev, _ in results if ev is not None}
+        return evs, [e for _, _, e in results if e]
+
     def respond(state: AgentState) -> dict[str, Any]:
         route = state["route"]
         notes = state.get("notes", [])
@@ -370,6 +395,8 @@ def build_agent(
         shown = state.get("shown", [])
         lines = [f"（{n}）" for n in notes]
         evidence = dict(evidence)
+        review_evs: dict[str, dict] = {}
+        events: list[dict] = []
 
         if route == "guard":
             lines.append(GUARD_REPLY)
@@ -384,8 +411,9 @@ def build_agent(
                 lines.append("以下商品部分信息不完整或可能已过期，下单前请以商品页为准：")
             else:
                 lines.append("根据你的要求，推荐这几款：")
+            review_evs, events = reviews_for(state, usable)
             for i, pid in enumerate(usable, 1):
-                lines += _card(i, pid, catalog, evidence[pid])
+                lines += _card(i, pid, catalog, evidence[pid], reason_lines(review_evs.get(pid, {})))
             shown = usable
         elif route == "compare":
             cmp = state.get("comparison", {})
@@ -406,6 +434,8 @@ def build_agent(
             lines.append(f"- 评分 {p.rating}，销量 {p.sales}，商家 {p.seller}（评分 {p.seller_rating or '暂无'}）")
             lines.append(f"- 特性：{'、'.join(p.features) or '无'}")
             lines += [f"- 注意：{t}" for t in describe_issues(ev)]
+            review_evs, events = reviews_for(state, [pid])
+            lines += [ln.replace("   ", "- ", 1) for ln in reason_lines(review_evs.get(pid, {}))]
             lines.append(f"- 链接：{p.deep_link}")
         else:  # fallback
             c = state.get("constraints", {})
@@ -427,16 +457,23 @@ def build_agent(
         allowed = {e["verified_price"] for e in evidence.values()}
         # 上一轮快照里的价格也是核验过的（“在 X（499 元）的基础上找更便宜的”）
         allowed |= {it["price"] for it in state.get("shown_snapshot", {}).get("items", [])}
-        check = {"ok": True, "rewritten": False}
+        # 评论引用只能指向本轮检索到的片段，原话要对得上，差评不能当卖点讲
+        snippets = snippet_index(review_evs)
+        check: dict[str, Any] = {"ok": True, "rewritten": False}
         if rewriter is not None and route in ("recommend", "caveat", "compare", "detail"):
             candidate = rewriter(text, state)
             bad = fact_check(candidate, allowed)
-            if bad:
-                check = {"ok": False, "rewritten": False, "unverified_prices": bad}
+            bad_cites = citation_check(candidate, snippets)
+            if bad or bad_cites:
+                check = {"ok": False, "rewritten": False}
+                if bad:
+                    check["unverified_prices"] = bad
+                if bad_cites:
+                    check["citation_problems"] = bad_cites
             else:
                 text, check = candidate, {"ok": True, "rewritten": True}
-        elif bad := fact_check(text, allowed):
-            check = {"ok": False, "unverified_prices": bad}
+        elif (bad := fact_check(text, allowed)) or (bad_cites := citation_check(text, snippets)):
+            check = {"ok": False, "unverified_prices": bad, "citation_problems": bad_cites if not bad else []}
         snapshot = state.get("shown_snapshot", {})
         if route in ("recommend", "caveat"):
             # 快照：序号 -> 商品 ID 的映射和展示时的价格固定下来，
@@ -448,13 +485,19 @@ def build_agent(
                     for i, pid in enumerate(shown, 1)
                 ],
             }
-        return {
+        review_trace = {pid: {a["aspect"]: a["verdict"] for a in ev["aspects"]} for pid, ev in review_evs.items()}
+        out: dict[str, Any] = {
             "response": text,
             "shown": shown,
             "shown_snapshot": snapshot,
+            "review_evidence": review_evs,
             "messages": [{"role": "assistant", "content": text}],
-            "_trace": {"route": route, "shown": shown, "fact_check": check},
+            "_trace": {"route": route, "shown": shown, "fact_check": check,
+                       **({"reviews": review_trace} if review_trace else {})},
         }
+        if events:
+            out["trace"] = events
+        return out
 
     def update_memory(state: AgentState) -> dict[str, Any]:
         if "memory" in ablate or state.get("route") in ("clarify", "guard"):
@@ -526,11 +569,12 @@ def build_agent(
     return g.compile(checkpointer=checkpointer, store=store)
 
 
-def _card(i: int, pid: str, catalog: Catalog, ev: dict[str, Any]) -> list[str]:
+def _card(i: int, pid: str, catalog: Catalog, ev: dict[str, Any], reasons: list[str] | None = None) -> list[str]:
     p = catalog[pid]
     out = [f"{i}. {p.title}｜{ev['verified_price']} 元｜评分 {p.rating}｜{p.seller}"]
     if p.features:
         out.append(f"   特性：{'、'.join(p.features)}")
+    out += reasons or []
     out += [f"   注意：{t}" for t in describe_issues(ev)]
     out.append(f"   {p.deep_link}")
     return out

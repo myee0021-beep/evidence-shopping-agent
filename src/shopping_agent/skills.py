@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
-from . import retrieval
+from . import retrieval, reviews
 from .catalog import Catalog
 from .config import Settings
 from .evidence import build_evidence, hard_violations
@@ -31,6 +31,7 @@ from .tooling import ToolArgsError, ToolSpec
 class SkillContext:
     catalog: Catalog
     settings: Settings
+    reviews: dict[str, list[dict[str, Any]]] = field(default_factory=dict)  # 商品 ID -> 评论
 
 
 @dataclass
@@ -168,3 +169,21 @@ def compare_products(a: CompareArgs, ctx: SkillContext) -> dict[str, Any]:
     cheapest = min(items, key=lambda x: x["price"])["id"]
     best_rated = max(items, key=lambda x: x["rating"])["id"]
     return {"items": items, "cheapest": cheapest, "best_rated": best_rated}
+
+
+class ReviewArgs(BaseModel):
+    product_id: str
+    aspects: list[str] = Field(min_length=1, max_length=5)
+    k: int = Field(2, ge=1, le=5)
+
+
+@skill(
+    "get_review_evidence",
+    "按卖点检索商品评论片段（BM25 + 向量混合检索），统计好评 / 差评并给出结论：supported / disputed / no_evidence。"
+    "推荐理由引用评论时必须带片段 ID",
+    ReviewArgs,
+)
+def get_review_evidence(a: ReviewArgs, ctx: SkillContext) -> dict[str, Any]:
+    if a.product_id not in ctx.catalog:
+        raise KeyError(f"product {a.product_id} not found")
+    return reviews.review_evidence(ctx.reviews.get(a.product_id, []), a.aspects, a.k)

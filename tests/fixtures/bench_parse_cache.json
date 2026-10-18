@@ -1,0 +1,244 @@
+{
+ "product\nLooking for a 12 inch heavy duty rubber wheel for a pushcart with cash on delivery.": {
+  "task": "product",
+  "items": [
+   {
+    "q": "heavy duty rubber wheel pushcart",
+    "price_min": null,
+    "price_max": null,
+    "services": [
+     "COD"
+    ],
+    "terms": [
+     {
+      "key": "size",
+      "value": "12 inch"
+     },
+     {
+      "key": "material",
+      "value": "rubber"
+     }
+    ]
+   }
+  ],
+  "voucher": null
+ },
+ "product\nI need a rubber wheel for my trolley, 8 inch.": {
+  "task": "product",
+  "items": [
+   {
+    "q": "rubber wheel trolley",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": [
+     {
+      "key": "size",
+      "value": "8 inch"
+     }
+    ]
+   }
+  ],
+  "voucher": null
+ },
+ "product\nShow me oil pastel crayons with oil-based ink, 50 colors.": {
+  "task": "product",
+  "items": [
+   {
+    "q": "oil pastel crayons",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": [
+     {
+      "key": "type_of_inks",
+      "value": "oil-based"
+     },
+     {
+      "key": null,
+      "value": "50 colors"
+     }
+    ]
+   }
+  ],
+  "voucher": null
+ },
+ "product\nLooking for an adjustable gold ring with free shipping.": {
+  "task": "product",
+  "items": [
+   {
+    "q": "adjustable gold ring",
+    "price_min": null,
+    "price_max": null,
+    "services": [
+     "freeShipping"
+    ],
+    "terms": [
+     {
+      "key": "material",
+      "value": "gold"
+     }
+    ]
+   }
+  ],
+  "voucher": null
+ },
+ "product\nI want a glow in the dark pushcart wheel.": {
+  "task": "product",
+  "items": [
+   {
+    "q": "pushcart wheel",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": [
+     {
+      "key": "color",
+      "value": "glow in the dark"
+     }
+    ]
+   }
+  ],
+  "voucher": null
+ },
+ "shop\nFind a shop that offers these items: (1) oil pastel crayons; (2) a sketch pad drawing paper.": {
+  "task": "shop",
+  "items": [
+   {
+    "q": "oil pastel crayons",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": []
+   },
+   {
+    "q": "sketch pad drawing paper",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": []
+   }
+  ],
+  "voucher": null
+ },
+ "shop\nFind a shop that offers these items: (1) oil pastel crayons junior artist; (2) a sketch pad A4; (3) a rubber wheel.": {
+  "task": "shop",
+  "items": [
+   {
+    "q": "oil pastel crayons junior artist",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": []
+   },
+   {
+    "q": "sketch pad a4",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": []
+   },
+   {
+    "q": "rubber wheel",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": [
+     {
+      "key": "size",
+      "value": "10 inch"
+     }
+    ]
+   }
+  ],
+  "voucher": null
+ },
+ "voucher\nI'm looking for oil pastel crayons, and a sketch pad.\n\nMy budget is only `380`, but I have a voucher with the following rules:\n1. The voucher only applies to the products from the same shop.\n2. It is valid only when the total price of the products exceeds `400`.\n3. It provides a fixed discount of `100`.": {
+  "task": "voucher",
+  "items": [
+   {
+    "q": "oil pastel crayons",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": [
+     {
+      "key": "type_of_inks",
+      "value": "oil-based"
+     }
+    ]
+   },
+   {
+    "q": "sketch pad",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": [
+     {
+      "key": null,
+      "value": "a4"
+     }
+    ]
+   }
+  ],
+  "voucher": {
+   "voucher_type": "shop",
+   "threshold": 400.0,
+   "discount_type": "fixed",
+   "face_value": 100.0,
+   "discount": null,
+   "cap": null,
+   "budget": 380.0
+  }
+ },
+ "voucher\nI'm looking for a rubber wheel, oil pastel crayons, and a sketch pad.\n\nMy budget is only `700`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `500`.\n3. It provides a fixed discount of `50`.": {
+  "task": "voucher",
+  "items": [
+   {
+    "q": "rubber wheel",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": [
+     {
+      "key": "size",
+      "value": "12 inch"
+     }
+    ]
+   },
+   {
+    "q": "oil pastel crayons",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": [
+     {
+      "key": null,
+      "value": "50 colors"
+     }
+    ]
+   },
+   {
+    "q": "sketch pad",
+    "price_min": null,
+    "price_max": null,
+    "services": [],
+    "terms": [
+     {
+      "key": null,
+      "value": "a4"
+     }
+    ]
+   }
+  ],
+  "voucher": {
+   "voucher_type": "platform",
+   "threshold": 500.0,
+   "discount_type": "fixed",
+   "face_value": 50.0,
+   "discount": null,
+   "cap": null,
+   "budget": 700.0
+  }
+ }
+}

@@ -14,6 +14,7 @@
 | 返回 | `{"ok", "data" / "error", "latency_ms", "attempts"}`，失败不抛异常 | 编排层统一决定重规划还是兜底 |
 | 观测 | 每次调用写一条 trace：参数、成败、错误、耗时 | bad case 回放、按 skill 统计时延和失败率 |
 | 暴露给模型 | `Skill.schema()` 导出 function calling 格式 | 规则编排和 LLM 编排用同一套 skill |
+| 契约基类 | `tooling.ToolSpec`：名字、描述、参数模型、是否只读、`schema()`、`validate()`。主链路 skill 和 ShoppingBench 沙箱工具（`bench/tools.py`）都继承它 | 加新工具只写参数模型和实现；校验、schema 导出、去重（只读才去重）不用重复写 |
 
 ## 每个 skill 对应的下游服务
 
@@ -24,6 +25,7 @@
 | `get_product_detail` | 读商品库（可模拟 RPC 时延） | 商品详情服务（PDP） | 多个候选并行拉取；只返回白名单字段 |
 | `verify_evidence` | 证据聚合 + 硬约束复核 | 价格服务（实时价、促销价）、库存服务、店铺服务（评分）、内容时效 | 实时字段（价格、库存）以详情为准，静态字段可以缓存 |
 | `compare_products` | 按证据对比 | 详情 + 评论 / UGC 服务 + 物流时效服务 | 价格按详情价，不按列表价；至少两个商品 |
+| `get_review_evidence` | 模拟评论上的 BM25 + 向量混合检索（RRF） | 评论 / UGC 服务、方面抽取（aspect）和情感模型 | 按卖点检索，好评差评聚合成 supported / disputed / no_evidence；返回片段 ID，推荐理由必须引用。见 [review_evidence.md](review_evidence.md) |
 
 电商导购场景里一般还会有：
 

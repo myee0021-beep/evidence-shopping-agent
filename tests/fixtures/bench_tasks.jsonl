@@ -1,0 +1,9 @@
+{"task": "product", "query": "Looking for a 12 inch heavy duty rubber wheel for a pushcart with cash on delivery."}
+{"task": "product", "query": "I need a rubber wheel for my trolley, 8 inch."}
+{"task": "product", "query": "Show me oil pastel crayons with oil-based ink, 50 colors."}
+{"task": "product", "query": "Looking for an adjustable gold ring with free shipping."}
+{"task": "product", "query": "I want a glow in the dark pushcart wheel."}
+{"task": "shop", "query": "Find a shop that offers these items: (1) oil pastel crayons; (2) a sketch pad drawing paper."}
+{"task": "shop", "query": "Find a shop that offers these items: (1) oil pastel crayons junior artist; (2) a sketch pad A4; (3) a rubber wheel."}
+{"task": "voucher", "query": "I'm looking for oil pastel crayons, and a sketch pad.\n\nMy budget is only `380`, but I have a voucher with the following rules:\n1. The voucher only applies to the products from the same shop.\n2. It is valid only when the total price of the products exceeds `400`.\n3. It provides a fixed discount of `100`."}
+{"task": "voucher", "query": "I'm looking for a rubber wheel, oil pastel crayons, and a sketch pad.\n\nMy budget is only `700`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `500`.\n3. It provides a fixed discount of `50`."}

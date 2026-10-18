@@ -48,6 +48,7 @@ class AgentState(TypedDict, total=False):
     candidates: list[str]  # 检索得到的候选池
     evidence: dict[str, dict]  # 商品 ID -> 证据记录
     comparison: dict[str, Any]
+    review_evidence: dict[str, dict]  # 商品 ID -> 评论证据（各方面的结论和引用片段）
     confidence: float
     route: str  # recommend | caveat | compare | detail | clarify | replan | fallback
     replan_count: int

@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 @dataclass(frozen=True)
 class Settings:
     catalog_path: Path = PROJECT_ROOT / "data" / "products.json"
+    reviews_path: Path = PROJECT_ROOT / "data" / "reviews.json"  # 模拟评论，评论证据用
     # 模拟数据的快照日期。证据时效按它计算，保证评测结果可复现。
     snapshot_date: date = date(2026, 10, 1)
     stale_days: int = 30

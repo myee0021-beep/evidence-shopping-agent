@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ValidationError
 
@@ -224,18 +225,20 @@ Output JSON only."""
 
 
 class LLMTaskParser:
-    def __init__(self, api_key: str, base_url: str | None, model: str):
+    def __init__(self, api_key: str, base_url: str | None, model: str, seed: int | None = None):
         from openai import OpenAI
 
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
+        self.seed = seed  # temperature=0 之外再固定 seed；不支持 seed 的服务会忽略它
 
     def __call__(self, query: str, task: Task) -> TaskSpec | None:
         body, voucher_text = split_voucher(query)
         messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": body}]
         for _ in range(2):
+            extra = {"seed": self.seed} if self.seed is not None else {}
             resp = self.client.chat.completions.create(
-                model=self.model, messages=messages, temperature=0, response_format={"type": "json_object"}
+                model=self.model, messages=messages, temperature=0, response_format={"type": "json_object"}, **extra
             )
             raw = resp.choices[0].message.content or ""
             try:
@@ -253,3 +256,31 @@ class LLMTaskParser:
                     {"role": "user", "content": f"Invalid output: {e}. Output JSON matching the schema only."},
                 ]
         return None
+
+
+class CachedParser:
+    """把解析结果按 (task, query) 存到 JSON 文件里。
+
+    LLM 即使 temperature=0 也不保证每次输出一致；第一次跑完把解析结果固定下来，之后的重跑
+    （比如改了检索策略做消融）用的是同一份解析，差异只来自被改动的模块。
+    """
+
+    def __init__(self, inner: "Callable[[str, Task], TaskSpec | None] | None", path: str | Path):
+        self.inner, self.path = inner, Path(path)
+        self.data: dict[str, Any] = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
+        self.hits = self.misses = 0
+
+    def __call__(self, query: str, task: Task) -> TaskSpec | None:
+        key = f"{task}\n{query}"
+        if key in self.data:
+            self.hits += 1
+            return TaskSpec(**self.data[key])
+        self.misses += 1
+        spec = self.inner(query, task) if self.inner else None
+        if spec is not None:
+            self.data[key] = spec.model_dump(mode="json")
+        return spec
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -30,10 +31,12 @@ INFO_FIELDS = ("product_id", "short_description", "description", "sku_options", 
 class Sandbox:
     def __init__(self) -> None:
         self.seen: dict[str, dict[str, Any]] = {}
+        self._seen_lock = threading.Lock()  # 多个子 agent 并行调用时共用 seen
 
     def _remember(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        for r in rows:
-            self.seen.setdefault(str(r["product_id"]), {}).update(r)
+        with self._seen_lock:
+            for r in rows:
+                self.seen.setdefault(str(r["product_id"]), {}).update(r)
         return rows
 
     def find_product(self, **params: Any) -> list[dict[str, Any]]:
@@ -161,3 +164,21 @@ def _price_range(price: str | None) -> tuple[float | None, float | None]:
             return None
 
     return num(parts[0]), num(parts[1])
+
+
+class LatencySandbox(Sandbox):
+    """给任意沙箱的每次调用加一段固定时延，模拟线上搜索 / 详情服务的 RPC 耗时（压测并行效果用）。"""
+
+    def __init__(self, inner: Sandbox, latency_ms: float):
+        super().__init__()
+        self.inner, self.latency_ms = inner, latency_ms
+        self.seen = inner.seen
+        self._seen_lock = inner._seen_lock
+
+    def find_product(self, **params: Any) -> list[dict[str, Any]]:
+        time.sleep(self.latency_ms / 1000)
+        return self.inner.find_product(**params)
+
+    def view_product_information(self, product_ids: str) -> list[dict[str, Any]]:
+        time.sleep(self.latency_ms / 1000)
+        return self.inner.view_product_information(product_ids)
