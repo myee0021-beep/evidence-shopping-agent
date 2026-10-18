@@ -122,27 +122,115 @@ def unpaired_tool_messages(messages: list[Message]) -> list[int]:
 
 # ---------- 工具结果卸载 ----------
 
+# 商品类工具结果的摘要字段：后续轮次做决策真正会用到的只有这些
+# （“第二个多少钱”“哪个有货”“哪个带降噪”）。主链路商品和 ShoppingBench 商品的字段名都覆盖到。
+_ID_KEYS = ("id", "product_id")
+_KEEP_KEYS = ("title", "brand", "shop_id", "price", "detail_price", "verified_price", "stock", "in_stock", "rating")
+_MAX_ATTRS = 4
+_TITLE_CHARS = 40
+
+
+def _product_rows(data: Any) -> list[dict[str, Any]] | None:
+    """如果 data 是商品（或商品列表、或 skill 统一返回的 {"ok", "data"}），返回商品行；否则 None。"""
+    if isinstance(data, dict) and "data" in data and "ok" in data:
+        data = data["data"]
+    if isinstance(data, dict) and isinstance(data.get("items"), list):  # compare_products
+        data = data["items"]
+    rows = data if isinstance(data, list) else [data]
+    if not rows or not all(isinstance(r, dict) and any(k in r for k in _ID_KEYS) for r in rows):
+        return None
+    return rows
+
+
+def _key_attrs(row: dict[str, Any]) -> list[str]:
+    attrs = [str(x) for x in row.get("features") or []]
+    for k, vs in (row.get("attributes") or {}).items():
+        attrs += [f"{k}={v}" for v in (vs if isinstance(vs, list) else [vs])]
+    for kv in (row.get("sku_options") or {}).values():
+        attrs += [f"{k}={v}" for k, v in kv.items()] if isinstance(kv, dict) else []
+    return list(dict.fromkeys(attrs))[:_MAX_ATTRS]
+
+
+def digest_products(content: str) -> str | None:
+    """把商品类工具结果压成“ID + 价格 + 库存 + 关键属性”的一行一个商品。
+
+    不是商品结构就返回 None，交给通用预览处理。详情价和列表价不一致时两个都保留，
+    因为这正是证据层要判断的冲突，压掉其中一个就等于替证据层做了决定。
+    """
+    try:
+        rows = _product_rows(json.loads(content))
+    except (ValueError, TypeError):
+        return None
+    if rows is None:
+        return None
+    lines = []
+    for r in rows:
+        pid = next(str(r[k]) for k in _ID_KEYS if k in r)
+        parts = [f"id={pid}"]
+        for k in _KEEP_KEYS:
+            if r.get(k) is None:
+                continue
+            v = str(r[k])[:_TITLE_CHARS] if k == "title" else r[k]
+            parts.append(f"{k}={v}")
+        if attrs := _key_attrs(r):
+            parts.append("attrs=" + "/".join(attrs))
+        lines.append("- " + " ".join(parts))
+    return "\n".join(lines)
+
 
 def offload_tool_results(
-    messages: list[Message], archive: ArchiveStore, caller: Caller, max_chars: int = 1200, preview_chars: int = 300
+    messages: list[Message],
+    archive: ArchiveStore,
+    caller: Caller,
+    max_chars: int = 1200,
+    preview_chars: int = 300,
+    digest_before: int | None = None,
+    product_digest: bool = True,
 ) -> tuple[list[Message], list[str]]:
-    """超长工具结果先完整归档，上下文里只留预览 + ref_id。归档失败就保留原文。"""
+    """工具结果卸载：原文先归档，上下文里只留摘要 + ref_id。归档失败就保留原文。
+
+    两条触发规则：
+    - 超过 max_chars 的工具结果，不管在哪一轮都卸载；
+    - digest_before 之前（也就是更早的轮次）的商品类结果，不论长短都降级成商品摘要。
+      最近一轮的工具结果保持原文，模型正在用它做判断。
+    product_digest=False 时退回旧行为：一律只留前 preview_chars 字符（评测对比用）。
+
+    商品类结果留结构化摘要（每个商品的 ID、价格、库存、关键属性），其余结果留前 preview_chars 字符。
+    原文都在 L0 归档里，需要完整字段时 recall_context 取回。
+    """
     out, refs = [], []
-    for m in messages:
+    for i, m in enumerate(messages):
         content = str(m.get("content") or "")
-        if m.get("role") == "tool" and len(content) > max_chars and not m.get("offloaded"):
+        if m.get("role") != "tool" or m.get("offloaded"):
+            out.append(m)
+            continue
+        too_long = len(content) > max_chars
+        old = product_digest and digest_before is not None and i < digest_before
+        digest = digest_products(content) if product_digest and (too_long or old) else None
+        # 摘要至少要省掉三成，否则只是把原文换了个写法，还多一次归档
+        worth_digesting = old and digest is not None and len(digest) < 0.7 * len(content)
+        if too_long or worth_digesting:
             try:
                 ref = archive.put(caller, "tool", content, meta={"tool_call_id": m.get("tool_call_id")})
             except Exception:  # noqa: BLE001 - 归档失败宁可不卸载
                 out.append(m)
                 continue
             refs.append(ref)
-            preview = content[:preview_chars]
+            if digest is not None and len(digest) < len(content):
+                # 商品摘要的引用行写短：旧轮次每轮都会有一条，长说明会把省下的 token 又吃回去
+                kind = "products"
+                new_content = f"[商品摘要｜原文 ref={ref}，需要完整字段用 recall_context]\n{digest}"
+            else:
+                kind = "preview"
+                new_content = (
+                    f"{content[:preview_chars]}…\n[完整结果已归档 ref={ref}，共 {len(content)} 字符，"
+                    f"需要时调用 recall_context(ref_id=\"{ref}\")]"
+                )
             m = {
                 **m,
-                "content": f"{preview}…\n[完整结果已归档 ref={ref}，共 {len(content)} 字符，"
-                f"需要时调用 recall_context(ref_id=\"{ref}\")]",
+                "content": new_content,
                 "offloaded": ref,
+                "offload_kind": kind,
             }
         out.append(m)
     return out, refs
@@ -210,6 +298,7 @@ def compact(
     keep_ratio: float = 0.4,
     summary_ratio: float = 0.2,
     max_tool_chars: int = 1200,
+    product_digest: bool = True,
 ) -> CompactResult:
     """预算 = 固定注入（pinned） + 对话历史。超过 budget × trigger_ratio 才压缩。
 
@@ -220,8 +309,12 @@ def compact(
     if pinned_tokens + before <= budget * trigger_ratio:
         return CompactResult("noop", messages, before, before)
 
-    # 先卸载超长工具结果，常常这一步就够了
-    msgs, refs = offload_tool_results(messages, archive, caller, max_tool_chars)
+    # 第一步：卸载工具结果（超长的 + 更早轮次的商品结果降级成摘要），常常这一步就够了
+    starts = turn_starts(messages)
+    msgs, refs = offload_tool_results(
+        messages, archive, caller, max_tool_chars,
+        digest_before=starts[-1] if starts else None, product_digest=product_digest,
+    )
     if pinned_tokens + count_tokens(msgs) <= budget * trigger_ratio:
         return CompactResult("compacted", msgs, before, count_tokens(msgs), refs)
 

@@ -15,15 +15,16 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from . import retrieval
 from .catalog import Catalog
 from .config import Settings
 from .evidence import build_evidence, hard_violations
+from .tooling import ToolArgsError, ToolSpec
 
 
 @dataclass
@@ -33,23 +34,10 @@ class SkillContext:
 
 
 @dataclass
-class Skill:
-    name: str
-    description: str
-    args_model: type[BaseModel]
-    fn: Callable[[BaseModel, SkillContext], Any]
-    idempotent: bool = True  # 只读 skill 可以安全重试；加购、下单这类写操作不能
+class Skill(ToolSpec):
+    """主链路 skill = 公共工具契约（名字、描述、参数模型、是否只读，见 tooling.ToolSpec）+ 实现函数。"""
 
-    def schema(self) -> dict[str, Any]:
-        """导出成 OpenAI 兼容的 function calling 格式。"""
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.args_model.model_json_schema(),
-            },
-        }
+    fn: Callable[[BaseModel, SkillContext], Any] = field(default=None, kw_only=True)  # type: ignore[assignment]
 
 
 REGISTRY: dict[str, Skill] = {}
@@ -57,7 +45,7 @@ REGISTRY: dict[str, Skill] = {}
 
 def skill(name: str, description: str, args_model: type[BaseModel]):
     def deco(fn):
-        REGISTRY[name] = Skill(name, description, args_model, fn)
+        REGISTRY[name] = Skill(name, description, args_model, fn=fn)
         return fn
 
     return deco
@@ -75,9 +63,9 @@ def call_skill(name: str, args: dict[str, Any], ctx: SkillContext) -> dict[str, 
     else:
         s = REGISTRY[name]
         try:
-            parsed = s.args_model(**args)
-        except ValidationError as e:  # 参数错误重试也没用，直接返回
-            parsed, result = None, {"ok": False, "error": f"invalid args: {e.errors()[0]['msg']}"}
+            parsed = s.validate(args)
+        except ToolArgsError as e:  # 参数错误重试也没用，直接返回
+            parsed, result = None, {"ok": False, "error": str(e)}
         if parsed is not None:
             retries = ctx.settings.skill_retries if s.idempotent else 0
             timeout = ctx.settings.skill_timeout_ms / 1000
